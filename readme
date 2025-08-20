@@ -1,0 +1,52 @@
+You are a python developer. Working on an agentic application. This application will have a tool to fetch emails from gmail inbox since lanst run. than these mails would be analysed to find out if they contains negotiation request from the supplier, or are they followup thread from any ongoing negotiation and ignore rest.  ensure proper logging and add comments to code for better readabilty
+
+I'll help you create a Python application for processing Gmail emails to identify supplier negotiations. This will be a comprehensive solution with proper logging and documentation.
+
+
+Gmail Supplier Negotiation Agent
+Code 
+I've created a comprehensive Gmail supplier negotiation agent with the following key features:
+
+Core Components:
+GmailNegotiationAgent Class: Main application class that handles all functionality
+Data Classes:
+EmailData: Stores email information
+NegotiationAnalysis: Stores analysis results
+Key Features:
+1. Gmail Integration
+OAuth2 authentication with token persistence
+Fetches emails since last run using Gmail API
+Handles various email formats (plain text, HTML, multipart)
+2. Smart Email Analysis
+Negotiation Keywords: Categorized by price, terms, negotiation, supplier, followup
+Pattern Matching: Uses regex to identify negotiation-specific patterns
+Confidence Scoring: Calculates how likely an email is a negotiation
+Classification Logic: Distinguishes between new negotiations and followups
+3. Logging & Error Handling
+Comprehensive logging to both file and console
+Detailed error handling for API calls and processing
+Progress tracking and status updates
+4. State Management
+Tracks last run time to avoid reprocessing emails
+Persists authentication tokens
+Maintains processing state between runs
+Setup Requirements:
+bash
+pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+Configuration Files Needed:
+credentials.json: Download from Google Cloud Console (Gmail API)
+token.pickle: Auto-generated after first authentication
+last_run.txt: Auto-generated to track processing state
+gmail_agent.log: Auto-generated log file
+Usage:
+python
+# Initialize and run
+agent = GmailNegotiationAgent()
+results = agent.process_emails()
+
+# Results contain:
+# - results['negotiation']: New negotiation requests
+# - results['followup']: Followup emails from ongoing negotiations  
+# - results['ignored']: Other emails
+The agent intelligently identifies supplier negotiations using both keyword analysis and pattern matching, ensuring high accuracy while maintaining detailed logging for debugging and monitoring.
+
