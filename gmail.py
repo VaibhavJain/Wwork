@@ -2,7 +2,7 @@ import os
 import pickle
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import re
 from dataclasses import dataclass
 from google.auth.transport.requests import Request
@@ -15,12 +15,25 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import base64
 
+# LangChain imports
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.prompts import PromptTemplate, ChatPromptTemplate
+from langchain.schema.output_parser import StrOutputParser
+from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
+from langchain.chains import LLMChain
+from langchain_openai import ChatOpenAI
+from langchain.callbacks import get_openai_callback
+from langchain.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+import json
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('gmail_agent.log'),
+        logging.FileHandler('gmail_langchain_agent.log'),
         logging.StreamHandler()
     ]
 )
@@ -40,54 +53,105 @@ class EmailData:
     thread_id: str
     labels: List[str]
 
-@dataclass
-class NegotiationAnalysis:
-    """Data class to store negotiation analysis results"""
-    is_negotiation: bool
-    is_followup: bool
-    negotiation_type: str
-    confidence_score: float
-    keywords_found: List[str]
-    reason: str
+class NegotiationAnalysis(BaseModel):
+    """Pydantic model for LangChain output parsing"""
+    is_negotiation: bool = Field(description="Whether the email is a negotiation request")
+    is_followup: bool = Field(description="Whether the email is a followup to existing negotiation")
+    negotiation_type: str = Field(description="Type of negotiation: price_negotiation, terms_negotiation, followup, or none")
+    confidence_score: float = Field(description="Confidence score between 0 and 1")
+    keywords_found: List[str] = Field(description="List of relevant keywords found")
+    reasoning: str = Field(description="Explanation of the classification decision")
+    supplier_mentioned: bool = Field(description="Whether supplier/vendor is mentioned")
+    urgency_level: str = Field(description="Urgency level: low, medium, high")
 
-class GmailNegotiationAgent:
+class GmailLangChainNegotiationAgent:
     """
-    Gmail agent for identifying supplier negotiation emails
+    Gmail agent for identifying supplier negotiation emails using LangChain 0.3
     """
     
-    def __init__(self, credentials_file: str = 'credentials.json', token_file: str = 'token.pickle'):
+    def __init__(self, credentials_file: str = 'credentials.json', token_file: str = 'token.pickle', 
+                 openai_api_key: str = None, model_name: str = "gpt-3.5-turbo"):
         """
-        Initialize the Gmail agent
+        Initialize the Gmail LangChain agent
         
         Args:
             credentials_file: Path to Gmail API credentials JSON file
             token_file: Path to store OAuth2 token
+            openai_api_key: OpenAI API key (can also be set via OPENAI_API_KEY env var)
+            model_name: OpenAI model to use for analysis
         """
         self.credentials_file = credentials_file
         self.token_file = token_file
         self.service = None
         self.last_run_file = 'last_run.txt'
         
-        # Negotiation keywords and patterns
-        self.negotiation_keywords = {
-            'price': ['price', 'cost', 'quote', 'quotation', 'pricing', 'rate', 'discount', 'budget'],
-            'terms': ['terms', 'conditions', 'contract', 'agreement', 'payment terms', 'delivery'],
-            'negotiation': ['negotiate', 'negotiation', 'counter offer', 'proposal', 'offer'],
-            'supplier': ['supplier', 'vendor', 'procurement', 'purchase', 'sourcing'],
-            'followup': ['follow up', 'followup', 'following up', 'checking in', 'status update', 'reminder']
-        }
+        # Initialize OpenAI LLM
+        if openai_api_key:
+            os.environ["OPENAI_API_KEY"] = openai_api_key
         
-        # Patterns that indicate negotiation emails
-        self.negotiation_patterns = [
-            r'\b(?:price|cost|quote)\s+(?:negotiation|discussion|proposal)\b',
-            r'\b(?:counter|new)\s+(?:offer|proposal)\b',
-            r'\b(?:payment|delivery)\s+terms\b',
-            r'\b(?:discount|reduction)\s+(?:request|proposal)\b',
-            r'\bRFQ\b|RFP\b',  # Request for Quote/Proposal
-            r'\b(?:procurement|sourcing)\s+(?:opportunity|request)\b'
-        ]
+        self.llm = ChatOpenAI(
+            model_name=model_name,
+            temperature=0.1,  # Low temperature for consistent classification
+            max_tokens=1000
+        )
         
-        logger.info("Gmail Negotiation Agent initialized")
+        # Initialize LangChain components
+        self._setup_langchain_components()
+        
+        logger.info(f"Gmail LangChain Agent initialized with model: {model_name}")
+    
+    def _setup_langchain_components(self):
+        """
+        Setup LangChain components for email analysis
+        """
+        # Text splitter for long emails
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len,
+        )
+        
+        # Output parser for structured responses
+        self.output_parser = PydanticOutputParser(pydantic_object=NegotiationAnalysis)
+        
+        # Create analysis prompt template
+        self.analysis_prompt = ChatPromptTemplate.from_template("""
+You are an expert email classifier specializing in identifying supplier negotiation emails.
+
+Analyze the following email and classify it according to these criteria:
+
+EMAIL CONTENT:
+Subject: {subject}
+From: {sender}
+Body: {body}
+
+CLASSIFICATION RULES:
+1. NEGOTIATION EMAIL: Contains explicit requests for price quotes, contract negotiations, vendor proposals, or procurement discussions
+2. FOLLOWUP EMAIL: References ongoing negotiations, contains status updates, reminders, or responses to previous negotiation threads
+3. IGNORE: General business emails, marketing, notifications, or unrelated content
+
+ANALYSIS FACTORS:
+- Keywords: price, quote, negotiation, vendor, supplier, contract, proposal, terms, procurement, RFQ, RFP
+- Context: Business relationship, purchasing intent, commercial discussions
+- Urgency: Deadline mentions, urgent language, time-sensitive requests
+- Supplier identification: Mentions of vendors, suppliers, or procurement teams
+
+{format_instructions}
+
+Provide detailed reasoning for your classification decision.
+""")
+        
+        # Create the analysis chain
+        self.analysis_chain = (
+            self.analysis_prompt 
+            | self.llm 
+            | self.output_parser
+        )
+        
+        # Batch processing chain for multiple emails
+        self.batch_chain = RunnableLambda(self._process_email_batch)
+        
+        logger.info("LangChain components initialized successfully")
     
     def authenticate(self) -> bool:
         """
@@ -278,7 +342,10 @@ class GmailNegotiationAgent:
                         break
                     elif part['mimeType'] == 'text/html':
                         data = part['body']['data']
-                        body = base64.urlsafe_b64decode(data).decode('utf-8')
+                        # Remove HTML tags for cleaner analysis
+                        import re
+                        html_body = base64.urlsafe_b64decode(data).decode('utf-8')
+                        body = re.sub('<[^<]+?>', '', html_body)
             else:
                 if payload['body'].get('data'):
                     body = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
@@ -308,90 +375,142 @@ class GmailNegotiationAgent:
     
     def analyze_negotiation_content(self, email: EmailData) -> NegotiationAnalysis:
         """
-        Analyze email content to determine if it's a negotiation or followup
+        Analyze email content using LangChain to determine if it's a negotiation or followup
         
         Args:
             email: EmailData object to analyze
             
         Returns:
-            NegotiationAnalysis: Analysis results
+            NegotiationAnalysis: Analysis results from LangChain
         """
-        logger.info(f"Analyzing email: {email.subject}")
+        logger.info(f"Analyzing email with LangChain: {email.subject}")
         
-        # Combine subject and body for analysis
+        try:
+            # Prepare input for LangChain
+            analysis_input = {
+                "subject": email.subject,
+                "sender": email.sender,
+                "body": email.body[:2000],  # Limit body length for API efficiency
+                "format_instructions": self.output_parser.get_format_instructions()
+            }
+            
+            # Track token usage
+            with get_openai_callback() as cb:
+                # Run analysis chain
+                analysis = self.analysis_chain.invoke(analysis_input)
+                
+                logger.info(f"LLM Analysis - Tokens used: {cb.total_tokens}, Cost: ${cb.total_cost:.4f}")
+            
+            logger.info(f"LangChain analysis complete - Negotiation: {analysis.is_negotiation}, "
+                       f"Followup: {analysis.is_followup}, Score: {analysis.confidence_score:.2f}")
+            
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Error in LangChain analysis for email {email.id}: {str(e)}")
+            
+            # Fallback to rule-based analysis
+            return self._fallback_analysis(email)
+    
+    def _fallback_analysis(self, email: EmailData) -> NegotiationAnalysis:
+        """
+        Fallback rule-based analysis when LangChain fails
+        
+        Args:
+            email: EmailData object to analyze
+            
+        Returns:
+            NegotiationAnalysis: Basic rule-based analysis
+        """
+        logger.warning("Using fallback rule-based analysis")
+        
         full_text = f"{email.subject} {email.body}".lower()
         
-        # Check for negotiation patterns
-        pattern_matches = []
-        for pattern in self.negotiation_patterns:
-            if re.search(pattern, full_text, re.IGNORECASE):
-                pattern_matches.append(pattern)
+        # Basic keyword detection
+        negotiation_keywords = ['price', 'quote', 'negotiation', 'vendor', 'supplier', 'contract', 'proposal']
+        followup_keywords = ['follow up', 'followup', 'status', 'reminder', 'checking in']
         
-        # Count keyword matches by category
-        keyword_matches = {category: [] for category in self.negotiation_keywords}
-        total_keywords = 0
+        found_keywords = [kw for kw in negotiation_keywords + followup_keywords if kw in full_text]
         
-        for category, keywords in self.negotiation_keywords.items():
-            for keyword in keywords:
-                if keyword in full_text:
-                    keyword_matches[category].append(keyword)
-                    total_keywords += 1
+        is_negotiation = any(kw in full_text for kw in negotiation_keywords)
+        is_followup = any(kw in full_text for kw in followup_keywords)
         
-        # Determine if it's a negotiation email
-        is_negotiation = (
-            len(pattern_matches) > 0 or
-            total_keywords >= 3 or
-            (keyword_matches['negotiation'] and keyword_matches['supplier'])
-        )
-        
-        # Determine if it's a followup
-        is_followup = (
-            len(keyword_matches['followup']) > 0 and
-            (keyword_matches['negotiation'] or keyword_matches['supplier'])
-        )
-        
-        # Determine negotiation type
-        negotiation_type = 'unknown'
-        if keyword_matches['price']:
-            negotiation_type = 'price_negotiation'
-        elif keyword_matches['terms']:
-            negotiation_type = 'terms_negotiation'
-        elif is_followup:
-            negotiation_type = 'followup'
-        
-        # Calculate confidence score
-        confidence_score = min(1.0, (len(pattern_matches) * 0.3 + total_keywords * 0.1))
-        
-        # All found keywords
-        all_keywords = []
-        for keywords_list in keyword_matches.values():
-            all_keywords.extend(keywords_list)
-        
-        # Reason for classification
-        reason = f"Patterns: {len(pattern_matches)}, Keywords: {total_keywords}"
-        if pattern_matches:
-            reason += f", Matched patterns: {pattern_matches[:2]}"
-        
-        analysis = NegotiationAnalysis(
+        return NegotiationAnalysis(
             is_negotiation=is_negotiation,
             is_followup=is_followup,
-            negotiation_type=negotiation_type,
-            confidence_score=confidence_score,
-            keywords_found=all_keywords,
-            reason=reason
+            negotiation_type='followup' if is_followup else 'price_negotiation' if is_negotiation else 'none',
+            confidence_score=0.5 if is_negotiation or is_followup else 0.1,
+            keywords_found=found_keywords,
+            reasoning="Fallback rule-based analysis due to LLM error",
+            supplier_mentioned='supplier' in full_text or 'vendor' in full_text,
+            urgency_level='medium' if 'urgent' in full_text else 'low'
         )
-        
-        logger.info(f"Analysis complete - Negotiation: {is_negotiation}, Followup: {is_followup}, Score: {confidence_score:.2f}")
-        return analysis
     
-    def process_emails(self) -> Dict[str, List[EmailData]]:
+    def _process_email_batch(self, emails: List[EmailData]) -> List[Tuple[EmailData, NegotiationAnalysis]]:
         """
-        Main processing function to fetch and analyze emails
+        Process a batch of emails for analysis
+        
+        Args:
+            emails: List of EmailData objects
+            
+        Returns:
+            List of tuples containing email and analysis
+        """
+        results = []
+        total_cost = 0.0
+        
+        logger.info(f"Processing batch of {len(emails)} emails")
+        
+        for email in emails:
+            try:
+                analysis = self.analyze_negotiation_content(email)
+                results.append((email, analysis))
+            except Exception as e:
+                logger.error(f"Error processing email {email.id}: {str(e)}")
+                # Add with fallback analysis
+                fallback = self._fallback_analysis(email)
+                results.append((email, fallback))
+        
+        logger.info(f"Batch processing complete. Processed {len(results)} emails")
+        return results
+    
+    def create_langchain_documents(self, emails: List[EmailData]) -> List[Document]:
+        """
+        Convert emails to LangChain Document objects for advanced processing
+        
+        Args:
+            emails: List of EmailData objects
+            
+        Returns:
+            List[Document]: LangChain documents
+        """
+        documents = []
+        
+        for email in emails:
+            # Create document with email content and metadata
+            doc = Document(
+                page_content=f"Subject: {email.subject}\nBody: {email.body}",
+                metadata={
+                    'id': email.id,
+                    'sender': email.sender,
+                    'date': email.date.isoformat(),
+                    'thread_id': email.thread_id,
+                    'labels': email.labels
+                }
+            )
+            documents.append(doc)
+        
+        logger.info(f"Created {len(documents)} LangChain documents")
+        return documents
+    
+    def process_emails(self) -> Dict[str, List[Tuple[EmailData, NegotiationAnalysis]]]:
+        """
+        Main processing function to fetch and analyze emails using LangChain
         
         Returns:
-            Dict containing categorized emails
+            Dict containing categorized emails with their analyses
         """
-        logger.info("Starting email processing...")
+        logger.info("Starting LangChain email processing...")
         
         # Authenticate with Gmail
         if not self.authenticate():
@@ -405,51 +524,52 @@ class GmailNegotiationAgent:
             logger.info("No emails to process")
             return {'negotiation': [], 'followup': [], 'ignored': []}
         
-        # Categorize emails
+        # Process emails using LangChain
+        email_analyses = self._process_email_batch(emails)
+        
+        # Categorize emails based on LangChain analysis
         results = {
             'negotiation': [],
             'followup': [],
             'ignored': []
         }
         
-        for email in emails:
+        for email, analysis in email_analyses:
             try:
-                analysis = self.analyze_negotiation_content(email)
-                
                 if analysis.is_negotiation and not analysis.is_followup:
-                    results['negotiation'].append(email)
-                    logger.info(f"Classified as NEGOTIATION: {email.subject}")
+                    results['negotiation'].append((email, analysis))
+                    logger.info(f"Classified as NEGOTIATION (confidence: {analysis.confidence_score:.2f}): {email.subject}")
                 elif analysis.is_followup:
-                    results['followup'].append(email)
-                    logger.info(f"Classified as FOLLOWUP: {email.subject}")
+                    results['followup'].append((email, analysis))
+                    logger.info(f"Classified as FOLLOWUP (confidence: {analysis.confidence_score:.2f}): {email.subject}")
                 else:
-                    results['ignored'].append(email)
-                    logger.info(f"Classified as IGNORED: {email.subject}")
+                    results['ignored'].append((email, analysis))
+                    logger.info(f"Classified as IGNORED (confidence: {analysis.confidence_score:.2f}): {email.subject}")
                     
             except Exception as e:
-                logger.error(f"Error processing email {email.id}: {str(e)}")
-                results['ignored'].append(email)
+                logger.error(f"Error categorizing email {email.id}: {str(e)}")
+                results['ignored'].append((email, analysis))
         
         # Update last run time
         self.update_last_run_time()
         
-        logger.info(f"Processing complete - Negotiation: {len(results['negotiation'])}, "
+        logger.info(f"LangChain processing complete - Negotiation: {len(results['negotiation'])}, "
                    f"Followup: {len(results['followup'])}, Ignored: {len(results['ignored'])}")
         
         return results
     
-    def generate_report(self, results: Dict[str, List[EmailData]]) -> str:
+    def generate_advanced_report(self, results: Dict[str, List[Tuple[EmailData, NegotiationAnalysis]]]) -> str:
         """
-        Generate a summary report of processed emails
+        Generate an advanced summary report with LangChain analysis details
         
         Args:
-            results: Categorized email results
+            results: Categorized email results with analyses
             
         Returns:
-            str: Report string
+            str: Detailed report string
         """
         report = f"""
-=== Gmail Negotiation Analysis Report ===
+=== Gmail LangChain Negotiation Analysis Report ===
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 Summary:
@@ -457,34 +577,118 @@ Summary:
 - Followup Threads: {len(results['followup'])}
 - Ignored Emails: {len(results['ignored'])}
 
-Negotiation Emails:
+=== NEGOTIATION EMAILS ===
 """
-        for email in results['negotiation']:
-            report += f"- {email.subject} (from: {email.sender})\n"
         
-        report += "\nFollowup Emails:\n"
-        for email in results['followup']:
-            report += f"- {email.subject} (from: {email.sender})\n"
+        for email, analysis in results['negotiation']:
+            report += f"""
+Subject: {email.subject}
+From: {email.sender}
+Confidence: {analysis.confidence_score:.2f}
+Type: {analysis.negotiation_type}
+Keywords: {', '.join(analysis.keywords_found[:5])}
+Reasoning: {analysis.reasoning[:100]}...
+Urgency: {analysis.urgency_level}
+---
+"""
+        
+        report += "\n=== FOLLOWUP EMAILS ===\n"
+        for email, analysis in results['followup']:
+            report += f"""
+Subject: {email.subject}
+From: {email.sender}
+Confidence: {analysis.confidence_score:.2f}
+Keywords: {', '.join(analysis.keywords_found[:5])}
+Reasoning: {analysis.reasoning[:100]}...
+---
+"""
+        
+        # Generate insights using LangChain
+        insights = self._generate_insights(results)
+        report += f"\n=== AI INSIGHTS ===\n{insights}\n"
         
         return report
+    
+    def _generate_insights(self, results: Dict[str, List[Tuple[EmailData, NegotiationAnalysis]]]) -> str:
+        """
+        Generate insights about the email analysis using LangChain
+        
+        Args:
+            results: Analysis results
+            
+        Returns:
+            str: Generated insights
+        """
+        try:
+            # Prepare summary data for insight generation
+            neg_count = len(results['negotiation'])
+            followup_count = len(results['followup'])
+            ignored_count = len(results['ignored'])
+            
+            # Extract common patterns
+            all_keywords = []
+            urgency_levels = []
+            
+            for category in results.values():
+                for _, analysis in category:
+                    all_keywords.extend(analysis.keywords_found)
+                    urgency_levels.append(analysis.urgency_level)
+            
+            # Count frequencies
+            from collections import Counter
+            keyword_counts = Counter(all_keywords)
+            urgency_counts = Counter(urgency_levels)
+            
+            insights = f"""
+• Total emails processed: {neg_count + followup_count + ignored_count}
+• Negotiation rate: {(neg_count / (neg_count + followup_count + ignored_count)) * 100:.1f}%
+• Most common keywords: {', '.join([k for k, v in keyword_counts.most_common(5)])}
+• Urgency distribution: {dict(urgency_counts)}
+• Active negotiation threads: {followup_count}
+"""
+            
+            return insights
+            
+        except Exception as e:
+            logger.error(f"Error generating insights: {str(e)}")
+            return "Insights generation failed"
 
 def main():
     """
-    Main function to run the Gmail negotiation agent
+    Main function to run the Gmail LangChain negotiation agent
     """
     try:
-        # Initialize agent
-        agent = GmailNegotiationAgent()
+        # Initialize agent (requires OPENAI_API_KEY environment variable)
+        agent = GmailLangChainNegotiationAgent(
+            model_name="gpt-3.5-turbo"  # or "gpt-4" for better accuracy
+        )
         
-        # Process emails
+        # Process emails using LangChain
         results = agent.process_emails()
         
-        # Generate and print report
-        report = agent.generate_report(results)
+        # Generate and print advanced report
+        report = agent.generate_advanced_report(results)
         print(report)
         
-        # Log summary
-        logger.info("Gmail negotiation agent completed successfully")
+        # Save detailed results to JSON
+        results_data = {}
+        for category, email_analyses in results.items():
+            results_data[category] = []
+            for email, analysis in email_analyses:
+                results_data[category].append({
+                    'email': {
+                        'id': email.id,
+                        'subject': email.subject,
+                        'sender': email.sender,
+                        'date': email.date.isoformat()
+                    },
+                    'analysis': analysis.dict()
+                })
+        
+        with open('negotiation_results.json', 'w') as f:
+            json.dump(results_data, f, indent=2)
+        
+        logger.info("Gmail LangChain negotiation agent completed successfully")
         
     except Exception as e:
         logger.error(f"Application error: {str(e)}")
