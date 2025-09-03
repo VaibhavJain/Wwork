@@ -2,6 +2,7 @@ You are a python developer. Working on an agentic application. This application 
 
 I'll help you create a Python application for processing Gmail emails to identify supplier negotiations. This will be a comprehensive solution with proper logging and documentation.
 
+pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
 Gmail Supplier Negotiation Agent
 Code 
