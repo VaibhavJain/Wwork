@@ -1,3 +1,4 @@
+#pip install langchain==0.3.* langchain-openai openai google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pydantic
 import os
 import pickle
 import logging
