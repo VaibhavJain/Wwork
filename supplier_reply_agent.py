@@ -26,12 +26,11 @@ from langchain.schema.output_parser import StrOutputParser
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.chains import LLMChain
 from langchain_openai import AzureChatOpenAI
-from langchain.callbacks import get_openai_callback
 from langchain.output_parsers import PydanticOutputParser
+from langchain_community.callbacks.manager import get_openai_callback
 
 # Pydantic models
-from pydantic import BaseModel, Field, validator
-from pydantic.types import EmailStr
+from pydantic import BaseModel, Field, validator, EmailStr
 
 # Configure comprehensive logging
 logging.basicConfig(
@@ -743,37 +742,37 @@ def main():
     try:
         # Initialize agent with Azure OpenAI credentials
         agent = SupplierReplyAgent(
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            azure_api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            azure_deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+            azure_endpoint="",
+            azure_api_key="",
+            azure_deployment_name="",
             model_name="gpt-4"
         )
         
         # Example supplier email content
         email_content = """
-Subject: Price Adjustment Request - Q4 2024
+            Subject: Price Adjustment Request - Q4 2024
 
-Dear Procurement Team,
+            Dear Procurement Team,
 
-I hope this email finds you well. I am writing to inform you of necessary price adjustments 
-for our products effective January 2025.
+            I hope this email finds you well. I am writing to inform you of necessary price adjustments 
+            for our products effective January 2025.
 
-Due to significant increases in raw material costs, particularly steel prices which have 
-risen 18% in the last quarter, and increased operational costs including a 12% rise in 
-labor expenses, we need to adjust our pricing structure:
+            Due to significant increases in raw material costs, particularly steel prices which have 
+            risen 18% in the last quarter, and increased operational costs including a 12% rise in 
+            labor expenses, we need to adjust our pricing structure:
 
-- Product A: $100.00 → $118.00 (18% increase)
-- Product B: $75.00 → $85.50 (14% increase)  
-- Product C: $150.00 → $169.50 (13% increase)
+            - Product A: $100.00 → $118.00 (18% increase)
+            - Product B: $75.00 → $85.50 (14% increase)  
+            - Product C: $150.00 → $169.50 (13% increase)
 
-We have absorbed these cost increases for as long as possible but can no longer maintain 
-current pricing. We value our partnership and hope for your understanding.
+            We have absorbed these cost increases for as long as possible but can no longer maintain 
+            current pricing. We value our partnership and hope for your understanding.
 
-Please let me know if you need any supporting documentation.
+            Please let me know if you need any supporting documentation.
 
-Best regards,
-John Smith
-ABC Suppliers Inc.
+            Best regards,
+            John Smith
+            ABC Suppliers Inc.
         """
         
         # Supplier information
@@ -794,4 +793,14 @@ ABC Suppliers Inc.
         
         # Process the supplier request
         print("Processing supplier price hike request...")
-        supplier_email, analyses, response = agent.process_supplier_
+        supplier_email, analyses, response = agent.process_supplier_request(email_content,supplier_info,company_context)
+        print(supplier_email)
+        print("***************")
+        print(analyses)
+        print("***************")
+        print(response)
+    finally:
+        print("bu")
+
+if __name__ =="__main__":
+    main()
