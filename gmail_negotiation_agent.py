@@ -1,4 +1,3 @@
-#pip install langchain==0.3.* langchain-openai openai google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pydantic
 import os
 import pickle
 import logging
@@ -23,8 +22,8 @@ from langchain.prompts import PromptTemplate, ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.chains import LLMChain
-from langchain_openai import ChatOpenAI
-from langchain.callbacks import get_openai_callback
+from langchain_openai import AzureChatOpenAI
+from langchain_community.callbacks.manager import get_openai_callback
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 import json
@@ -87,13 +86,13 @@ class GmailLangChainNegotiationAgent:
         self.last_run_file = 'last_run.txt'
         
         # Initialize OpenAI LLM
-        if openai_api_key:
-            os.environ["OPENAI_API_KEY"] = openai_api_key
-        
-        self.llm = ChatOpenAI(
-            model_name=model_name,
-            temperature=0.1,  # Low temperature for consistent classification
-            max_tokens=1000
+        self.llm = AzureChatOpenAI(
+            azure_endpoint="https://.openai.azure.com/",
+            api_key="",
+            azure_deployment="gpt-4.1-mini",
+            api_version="2024-05-01-preview",
+            model_name="gpt-4.1-mini",
+            temperature=0.1
         )
         
         # Initialize LangChain components
@@ -661,7 +660,7 @@ def main():
     try:
         # Initialize agent (requires OPENAI_API_KEY environment variable)
         agent = GmailLangChainNegotiationAgent(
-            model_name="gpt-3.5-turbo"  # or "gpt-4" for better accuracy
+            model_name="scm-gpt-4.1-mini"  # or "gpt-4" for better accuracy
         )
         
         # Process emails using LangChain
